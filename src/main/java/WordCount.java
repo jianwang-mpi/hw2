@@ -1,44 +1,27 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 
-// Modified by Shimin Chen to demonstrate functionality for Homework 2
-// April-May 2015
-
-import java.io.DataInput;
-import java.io.DataOutput;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
-import java.util.StringTokenizer;
+import java.math.BigDecimal;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.io.Writable;
+import org.apache.hadoop.io.compress.CompressionCodec;
+import org.apache.hadoop.io.compress.GzipCodec;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
+import org.apache.hadoop.mapreduce.RecordWriter;
 import org.apache.hadoop.mapreduce.Reducer;
+import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
-import org.apache.hadoop.mapred.TextInputFormat;
-import org.apache.hadoop.mapred.TextOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.hadoop.util.GenericOptionsParser;
+import org.apache.hadoop.util.ReflectionUtils;
 
 public class WordCount {
 
@@ -46,9 +29,8 @@ public class WordCount {
     // reference: http://hadoop.apache.org/docs/r2.6.0/api/org/apache/hadoop/mapreduce/Mapper.html
     //
     public static class TokenizerMapper
-            extends Mapper<Object, Text, Text, IntWritable> {
+            extends Mapper<Object, Text, Text, Text> {
 
-        private final static IntWritable one = new IntWritable(1);
         private Text word = new Text();
 
         public void map(Object key, Text value, Context context
@@ -59,29 +41,37 @@ public class WordCount {
                 for (String token : tokens) {
                     System.out.println(token);
                 }
-                if(tokens.length!=3){
+                if (tokens.length != 3) {
                     continue;
                 }
-                String fromToPair = tokens[0]+" "+tokens[1];
+                String fromToPair = tokens[0] + " " + tokens[1];
+                String valuePair = "1" + " " + tokens[2];
                 word.set(fromToPair);
-                context.write(word,one);
+                context.write(word, new Text(valuePair));
             }
         }
     }
 
     public static class IntSumCombiner
-            extends Reducer<Text, IntWritable, Text, IntWritable> {
-        private IntWritable result = new IntWritable();
+            extends Reducer<Text, Text, Text, Text> {
 
-        public void reduce(Text key, Iterable<IntWritable> values,
+        public void reduce(Text key, Iterable<Text> values,
                            Context context
         ) throws IOException, InterruptedException {
+            int count = 0;
             int sum = 0;
-            for (IntWritable val : values) {
-                sum += val.get();
+            double average = 0d;
+            for (Text val : values) {
+                count++;
+                String valuePair = val.toString();
+                String[] pairs = valuePair.split(" ");
+                Integer num = Integer.valueOf(pairs[0]);
+                Double time = Double.valueOf(pairs[1]);
+                sum += num;
+                average += time;
             }
-            result.set(sum);
-            context.write(key, result);
+            average /= count;
+            context.write(key, new Text("" + sum + " " + average));
         }
     }
 
@@ -93,31 +83,55 @@ public class WordCount {
     // count of word = count
     //
     public static class IntSumReducer
-            extends Reducer<Text, IntWritable, Text, Text> {
+            extends Reducer<Text, Text, Text, Text> {
 
-        private Text result_key = new Text();
-        private Text result_value = new Text();
-
-
-        public void reduce(Text key, Iterable<IntWritable> values,
+        public void reduce(Text key, Iterable<Text> values,
                            Context context
         ) throws IOException, InterruptedException {
+            int count = 0;
             int sum = 0;
-            for (IntWritable val : values) {
-                sum += val.get();
+            double average = 0d;
+            for (Text val : values) {
+                count++;
+                String valuePair = val.toString();
+                String[] pairs = valuePair.split(" ");
+                Integer num = Integer.valueOf(pairs[0]);
+                Double time = Double.valueOf(pairs[1]);
+                sum += num;
+                average += time;
+            }
+            average /= count;
+            BigDecimal bigDecimal = new BigDecimal(average);
+
+            context.write(key, new Text("" + sum + " " + bigDecimal.setScale(3,BigDecimal.ROUND_HALF_UP)));
+        }
+    }
+    private static class MyOutputFormat<K,V> extends TextOutputFormat<K,V> {
+
+        public RecordWriter getRecordWriter(TaskAttemptContext job) throws IOException, InterruptedException {
+            Configuration conf = job.getConfiguration();
+            boolean isCompressed = getCompressOutput(job);
+            String keyValueSeparator = conf.get(SEPERATOR, " ");
+            CompressionCodec codec = null;
+            String extension = "";
+            if(isCompressed) {
+                Class file = getOutputCompressorClass(job, GzipCodec.class);
+                codec = (CompressionCodec)ReflectionUtils.newInstance(file, conf);
+                extension = codec.getDefaultExtension();
             }
 
-            // generate result key
-            // result_key.set(prefix);
-            result_key.clear();
-            result_key.append(key.getBytes(), 0, key.getLength());
-            // result_key.append(suffix, 0, suffix.length);
-
-            // generate result value
-            result_value.set(Integer.toString(sum));
-
-            context.write(result_key, result_value);
+            Path file1 = this.getDefaultWorkFile(job, extension);
+            FileSystem fs = file1.getFileSystem(conf);
+            FSDataOutputStream fileOut;
+            if(!isCompressed) {
+                fileOut = fs.create(file1, false);
+                return new TextOutputFormat.LineRecordWriter(fileOut, keyValueSeparator);
+            } else {
+                fileOut = fs.create(file1, false);
+                return new TextOutputFormat.LineRecordWriter(new DataOutputStream(codec.createOutputStream(fileOut)), keyValueSeparator);
+            }
         }
+
     }
 
     public static void main(String[] args) throws Exception {
@@ -137,7 +151,7 @@ public class WordCount {
         job.setReducerClass(IntSumReducer.class);
 
         job.setMapOutputKeyClass(Text.class);
-        job.setMapOutputValueClass(IntWritable.class);
+        job.setMapOutputValueClass(Text.class);
 
         job.setOutputKeyClass(Text.class);
         job.setOutputValueClass(Text.class);
@@ -145,11 +159,6 @@ public class WordCount {
         // add the input paths as given by command line
         for (int i = 0; i < otherArgs.length - 1; ++i) {
             FileInputFormat.addInputPath(job, new Path(otherArgs[i]));
-        }
-        String outPath = otherArgs[otherArgs.length - 1];
-        File file = new File(outPath);
-        if (file.exists()) {
-            FileUtils.deleteDirectory(file);
         }
         // add the output path as given by the command line
         FileOutputFormat.setOutputPath(job,
